@@ -1,0 +1,655 @@
+# QCON 2023 Notes
+
+## Internal
+- Dev portal
+    - Need to define SDLC
+    - Expectations for code style
+    - Paved road + guides
+- Culture
+    - Host talks to attract and network with other engineers, put ourselves on a map, advertise our brand
+        - We have interesting challenges
+    - Engineering blog
+    - Engineering needs an identity
+- “Engineering” as a Github organisation
+    - Repo for dev portal
+        - Section for platforms
+    - Ways of working, SLDC, best practices etc
+    - “Open-source” libraries:
+        - Log sanitiser
+        - DynamoDB
+        - JWT bearer validation
+            - Could have the CA certs built-in
+- Branding
+    - We need to sell our engineering department to attract talent
+    - Logos, colours/theme, talks, blogs, tooling etc
+    - Stickers
+- Metrics:
+    - DORA
+
+
+## Paved Road
+- Paved road:
+    /deployment
+        xxx.json - config for auto-generator/templating tool
+        /boilerplate - do not change
+            Jenkinsfile
+            Jenkinsfile.prod
+            Jenkinsfile.seedjob?
+        /configmaps
+        /targets - equivalent to clusters today
+
+
+### worldpy cli
+Requirements:
+- Needs to work on Windows (EUC/wDesk), Linux (RDD) and Mac
+
+Create a new service with default skeelton and boilerplate:
+xxx create [service name]
+
+Rebuild the boilerplate, and pulls down the latest changes:
+xxx update
+
+
+### xxx.json
+- targets:
+    - target: dev-euwest1
+      namespace: yolo
+- jenkins:
+    - performance: true/false
+
+
+### Templating
+build.gradle has a dependencies section managed by the skeleton e.g.
+// <boilerplate>
+
+// </boilerplate>
+
+The section would be replaced entirely when running the cli update, with the minimum required libraries etc.
+
+
+### Concerns
+- k8 rolling update strategy and lack of canary
+- Java Spring Boot + nginx
+- Need to revisit the way we distribute front-end assets
+    - cdn.xxx.com -> re-raise with e2e architecture
+
+
+## Day 1
+
+### Eventual Consistency
+- acid vs base
+- eventual consistency -> eventually converge to the same state (rather than isolation as seen in acid)
+-   - consistency achieved by each replica receiving the same update, and applied in the same order
+    - no isolation guarantees, such as e.g. repeatable reads
+    - source of human error: difficult to test, application responsible for concurrency?
+- traditional model (ddd): app code -> domain model layer (repos) -> infra (enforces cosnsitency on the DB)
+- acid 2.0 for distributed systems (pet hellend)
+    - “conflict-free replicated data types”
+    - associative, commutative, _, _
+    - example with an amazon cart: two carts, different items -> merge carts
+        - network partitions out of sync
+        - downside: deleted items re-appear
+        - better to accept issues with e.g. refunds for items, and be highly available
+- 1st level classification of replicated aggregates
+    - immutable: immutable aggregates
+    - mutable non-current in-place updates (e.g. kpis, counts) -> derived aggregates
+    - slide too fast...
+    - in summary: different types classified by various attributes/properties
+- in summary: based on the case, it may be more appropriate to apply eventual consistency, with some acceptance of lack of consistency as a trade-off for availability
+- interesting ddd anti-pattern with updating data everywhere, better to have a primary copy updated and sole owner (theme of previous years)
+
+
+### Breaking Free from End-to-End Testing
+- Talk by Discover (credit card / payments company)
+- Their CICD pipeline:
+    - “Component tests”, which are tests against something deployed
+        - Rather than running locally on the agent
+    - “E2E” tests - need an environment fully deployed, where things slow down
+    - “Go / no go process” - approvals, sign-offs etc
+- “E2E”:
+    - Slow, fragile, can take minutes to hours, false positives
+    - Stability due to being shared by multiple teams
+    - Monolithic testing, defeats the purpose of microservices
+    - Unclear responsibility/ownership of the E2E tests across a system
+    - Release queues building up when scaling up teams and new components, then releases became batched
+    - Overall: doesn’t scale linearally
+- Contract testing:
+    - No need to deploy services
+    - Test services by running unit tests
+        - Scales linearlly
+    - Removes complex release co-ordination
+- Contract testing strategies:
+    - Provider driven:
+        - Provider publishes the contract used by consumers e.g. OpenAPI spec (and creating mocks from it)
+        - Problem: mock is very basic, not very intelligent
+        - Problem: provider doesn’t have insight into how the consumer uses their API
+            - Makes v2 of API or makes assumptions and breaks the API
+    - Consumer driven:
+        - Run tests using provider mock, captured in the form of consumer contract
+        - Provider runs consumer contract against their service to check it meets consumer’s needs
+        - Code-based verification; downside: provider needs to do work
+        - Schema based verification; upside: easy to implement; downside: only catches basic issues, not as powerful as code based verification
+            - Adopted by Discover
+            - Helps with APi evolution
+            - Suitable for internal APIs
+- They’ve adopted consumer driven tests, primarily using code-based verification, and looking to later add schema-based verification
+- Tools:
+    - Contract testing tools (OSS)
+        - They did proof of concepts....
+        - Spring Cloud Contract:
+            - Downside: needs  to be manually written, causes drift (goes out of sync with code-base)
+            - Upside: works well with Spring ecosystem
+        - PACT:
+            - Upside: code generates contract
+            - Upside: not tied to any specific language or framework / multiple language support
+            - Upside: allows for different provider states
+            - Upside: PACT broker; allows you to manage and publish contracts and results in a central place
+- They chose PACT due to many upsides
+- In reality, cannot expect teams to adopt PACT
+- Consumer workflow:
+    - They added a “Contract Test” stage in their pipeline, next to “Unit Tests”
+    - Webhooks used to run verification tests when contracts changed
+        - Fast feedback
+    - PACT broker collects which environment has which version of the service
+        - Used to build a compatibility matrix
+    - Canary deploy to check whether compatible? (in provider as well) - need more digging???
+- Verification workflow:
+    - Pulls contracts from PACT broker, runs consuemr contracts and publishes results to the broker
+    - No webhooks involved
+    - Canary deploy to check whether compatible? (in consumer as well) - need to dig more into this???
+- They found a lot of complexity in the provider/consumer testing in CI/CD, thus abstracted it
+    - Simplify by asbtracting using automation
+    - More teams adopted PACT after abstracting PACT
+    Scaled up PACT:
+        - Community of practice for testing/QA - named “guilds” and CoPs
+        - Getting started guides
+        - Sample projects (internal)
+        - Training and workshops
+            - They have a platform internally for helping to train others
+        - Metrics and success stories
+            - Nice...objective!
+        - Contract testing champions
+- Summary of their journey:
+    - Set the strategy
+    - Pick the tool & poc
+    - Integrate with ci/cd
+    - Abstract away complexities
+        - Developer experience is important
+    - Scale-up
+    - Measure
+    - Break-free from E2E testing
+- Q & A:
+    - What are the metrics you collected?
+        - Two key metrics (dora metrics?):
+            - Change lead time - speed to production
+            - Change failure rate
+    - Have you retired E2E tests?
+        - No, much less though. Still value in running them, just on critical user journeys. Aim is to keep them small.
+    - Abstracting away the complexities, sounds easy in theory, but what was the efforts involved?
+        - They’re using a common template for pipelines / reusable components.
+        - They just had to do the changes once in the common pipeline.
+        - Then all teams benefited.
+- Internal: need to template pipelines in order to speed-up delivery, PACT is too high in cost to setup right now
+
+
+### Change Data Capture for Microservices
+- CDC: having a change log to propagate events
+    - Effectively observer pattern
+- Debezium - the example provided in the talk
+    - Mostly used to feed from e.g. an RDMS (such as MySQL) into Apache Kafka
+- Example event in JSON with before and after of the model (attributes, with data), plus meta-data (timestamps, versions etc)
+- Recommends talk from Stripe
+- Outbox pattern:
+    - Example of problem:
+        - Dual writes are prone to inconsistencies
+        - E.g. write to two different tables, each going out to a separate Kafka stream
+        - E.g. order and payment tables, with separate writes
+        - What if data is rolled-back in one table?
+        - Order might send goods, but credit card/payment is rolled back
+    - Solution:
+        - Write to both tables, and then put event in a separate outbox table to go out
+        - Outbox table goes out to both Kafka streams
+        - Ensures atomic writing before suceeded
+        - On Postgres, can directly write to WAL (write ahead log) as event to avoid having a separate outbox table
+            - No need to do house-keeping e.g. deleting old data
+            - Cannot modify data
+            - We want immutable events emitted
+- Stranger fig pattern:
+    - Example problem of an old monolithic java app talking to mysql
+    - Solution:
+        - Everything sent to the monolith, but Envoy put in front as proxy
+        - Monolith’s mysql emits to e.g. Mongodb for a function
+        - Envoy splits to new microservice, which talks to mongodb for a function
+        - Slowly move all functions to their own microservice and mongo (in this example)
+        - Internal: really nice use of stranger fig actually :) relevant to legacy platforms
+    - Perform migration in small steps, avoids big bang migration, can be reversed - overall reduces risk
+- CDC events lack meta-data
+    - Solution: use Apache Flink to enrich change events
+
+
+### Effective & Efficient Observability with Open Telemetry
+- Company: SkyScanner
+- Effective telemetry:
+    - High granularity: high detailed information about an operation
+    - RIch context
+    - Signal correlation
+    - Service correlation
+    - Open standards across all platforms: agnostic / open between different frameworks/services/platforms etc
+- Make golden path the path of least resistance
+    - They have an enablement team to maintain golden path
+    - Core libraries, standard docker images
+- Allowed them to reduce the vendors used, and complexity of observability
+- Stats on their setup:
+    - >1.8M spans per seconds, >90k traces per second
+    - They keep 4.5% of all traces
+        - Those with: errors, slowness and random percentage of the rest
+- Data exported to OTP and prometheous
+- Keep only useful data:
+    - Probability sampling
+        - Sample some of the spans
+    - Tail based sampling
+        - Sample the entire trace based on properties e.g. errors, slowness etc
+- Pro-tips:
+    - CoPs/guilds
+    - Establish targets for time to detect and time to resolve
+    - Internal: observability guild/CoP?
+- “Need a holistic view of our system, not the three pillars of observability in silos”
+- OpenScanner uses replicas deployed on a clsuter, rather than side-cart deployments, so that data is collected with lower latency
+
+
+### Connecting the Dots: API Design in a Distributed World
+- Ben Gamble
+- Availability: only strong as your weakest link, e.g. dashboards, config services etc
+- Problem with lots of internal APIs is scaling up, needing firewalls and load balancing etc
+- Statement: are we repeating ourselves with SOLID (excluding L / substitution) when it comes to API design?
+- APIs on APIs (scaffolding)
+    - Conways law problem
+    - How composable are these systems? Do they need to be individual APIs?
+    - Tiered APis are an anti-pattern
+        - Internal: ;)
+
+
+### Banking on Thousands of Microservices
+Note: amazing to see their journey every year
+
+- Timeline:
+    - Started with using rpc over rabbit mq
+-   - Moved to just HTTP-based RPC
+    - Cassandra for persisting data
+        - they first write to the index table, and then the canonical table
+    - adopted kubernetes in 2016
+    - (generic) suggested k8fs / k8 failure stories - war stories from companies at scale
+    - migrated from third-party to onprem for faster bank transfers in 2019
+        - decision to deploy single binary to data-centers (rather than microservices)
+    - Mention of coinbase not adopting k8 in the past, but re-assessing in 2022
+    - Mention of moving from their own k8 to EKS
+- Scaled from tens of engineers and services to 300 engineers and over 2k services
+- Clear boundary of services allowing change of ownership -> mhmm interesting
+- Platform team:
+    - Maintaining shared core library
+        - RPC, cassandra, locking, logging, metrics, queueing
+    - Providing infra
+- Engineers are not given much control
+    - Focus on writing business logic, library is very opinionated
+- Observability: prometheus, open telemetry, Jaeger
+    - Telemetry used to help estimate pre-provisioned resource required for peak times
+- Abstract platform from engineers
+    - Shouldn’t need to know about Kubernetes
+    - Heavy investment in the paved road
+    - EKS migration not exposed, engineers shouldn’t know or care
+- Recommendation: his own talk/article on InfoQ “Hone your Tools”
+- Pattern of coherence services constantly correcting or flagging (for human intervention) inconsistent data
+- Note on engineers not being leveraged well due to a lack of investment, with paved roads
+- By enforcing the same pattern across services, teams can look at any other service and feel familiar
+- They have a “Backend Engineering 101” onboarding guide to adopt the paved path
+- Using a monorepo - everything in one large repo...
+- Channel for showing graphs where optimisations have been made
+- Suggestion: FCA report on TSB outage, investigates the org issues, as well as technical
+- Brodge between infrastructure and apps
+    - Shouldn’t be experts in k8, cassandra etc
+    - Abstract core patterns, behind well documented and tested abstractions/interfaces
+- Q & A:
+    - How do they handle AWS?
+        - Trade-off of availability and consistency
+        - Depends on the context e.g. consistency for the ledger (consistency is critical),
+          whereas analytics is less important
+        - No size fits all solution
+        - Prefer to reject write if they cannot meet a quarum for highly-consistent data
+
+
+## Day 2
+### Computer Networks: Myths, Missteps and Mysteries
+- Good opening keynote
+- Creator of spanning trees (networks)
+- Main take-aways:
+    - [need to rewatch, few others]
+    - Always competing technical “innovation” and fads
+    - User is not to blame
+        - Make it simple / remove configuration
+
+
+### How will evolutionary architecture evolve?
+- Rebecca @ ThoughtWorks
+- Evolutionary: guided, not agile or emergent
+- Principles today:
+    - Last responsible moment:
+        - Delay until the last moment possible, as to gain as much of an informed decision as possible
+    - Architect & develop for evolvability:
+        - Key to something that can change is clean code (with a good test suite), where it’s well understood
+        - Where do you draw the boxes?
+            - SOA was wrong for putting it around boxes, rather than business contexts
+            - Better to draw it around the areas of the business, and how it works
+            - Draw around the boxes around where people (end-users) think of the system
+        - Postel’s law
+            - Be generous around what you receive, but strict around what you send out
+        - Architect for testability
+            - Don’t e.g. have too much business logic on connection points
+            - Seeing a trend of relying on testing in production, through mechanisms such as dynamic fitness functions
+                - Dynamic fitness function: e.g. cpu usage - objective measure of “success”?
+        - Conway’s Law
+            - Issues in systems can be traced back to issues with the organisation and people
+            - The systems created reflect/minmic the dysfunctions of your organisation
+            - Impact from remote & hybrid team structures?
+- Evolution of platforms
+    - Business capability platforms, developer experience/capability platforms
+    - How are we going to evolve the underlying infra, as well as the interface?
+- What is the impact of new technologies on architectures? AI, no-code/low-code etc.
+- Practices of today:
+    - Evolutionary of database design
+    - Contract testing
+        - Independent work
+    - Choreography (as opposed to orchestrated?)
+        - Not entirely recommended
+        - Not sure what this is?
+    - Continuous delivery
+        - Considered a safety net?
+- 2025 predictions:
+    - Persistence data-types will evolve, but otherwise the same
+    - AI-assisted contract testing
+    - New mechanisms for deployment
+- Business capability:
+    - Building blocks for the business to design new products and services from the underlying capabilities
+    - Business appkication owner can combine to build new offerings (my interpretation)
+    - Internal: aggregated propositions
+
+
+### Level Up Your Architecture Game
+- Four great skills of an architect (in order in term sof like a pyramid / foundation):
+    - Strong communication
+    - Decision making
+    - Adaptability
+    - Leadership
+- “Every software problem is a communicatiojn problem”
+- Trade-off analysis: cost, -ilities (quality attribute requirements), NFRs, functional requirements, decision criteria
+- Evaluating the -ilities
+    - Quantity and prioritise e.g. latency, security etc
+- Communication your decisions
+    - UML
+    - Boxes and arrows
+    - C4 architecture model
+    - Depends on your audience, C4 allows for serving different audiences
+- ADRs
+    - MADR framework for markdown
+    - Mermaid for inline diagrams
+    - Internal: status could have superseded with link
+- “No architecture survives the first contact with the engineers”
+-  Adaptability:
+    - Responding to change:
+        - Change in circumstances, misunderstanding of the requirements
+    - “Continuous architecture” recommended on InfoQ
+    - MVA - minimum-viable architecture
+    - Change with hybrid and remote working
+- “How we work influences what we build” - reference to Conways Law again
+- Leadership
+    - Inverted pyramid
+        - People in the front-line to customers are the most important
+        - CEO is least important
+        - Willing to help others
+- Architects should write code
+    - Agreed.
+    - Validate designs.
+    - Share the pain / “got skin in the game”
+        - No throwing it over the wall / blaming the engineers
+    - Get out of the ivory tower
+    - Not full time.
+- Ask an AI to write an ADR
+    - Tool to agument the job: like using an IDE vs a text editor
+    - Use it for suggestions
+- Research techniques:
+    - Event storming
+        - eventstorming.com
+    - Domain storytelling
+        - infoq.com/podcasts/domain-storytelling
+    - Responsibility to improve scientific method
+- - ADR process can be applied to non-architecture decisions
+    - Internal: already partially using this successfully
+- Reomemnded book:
+    - The Software Architect Elevator
+- A 10x engineer/architect is someone that enables 10 others to be more effective
+    - Agreed.
+
+
+### Fintech Panel
+- Interesting views, enjoyable panel.
+- Lower profitability, thus companies collaborating together.
+- Individuals with lots of domain knowledge, not in their interests to share how their niche areas work, as being niche has financial incentives.
+- No further notes.
+
+
+### Platform Engineering: Where Do We Go From Here?
+- Synk
+- IDP: internal developer platform
+- Recommendation: build for the 99% developers (blog post by Jean Yang)
+- “Incentives, not mandates” of paved roads
+- Strongly opionated platforms
+    - Extremely repeatable
+    - Gitops
+    - Sane defaults
+    - Self-service
+    - Contribute back to the central function, incl. documentation
+- Matthew Skelton twitter post: maintaining a high-quality wiki on guides of patterns to follow
+- THey’re using Backstace
+    - And recommend it.
+- Event storming & domain modelling
+    - Seen in earlier talk as well
+    - They have a developer experience team
+        - Common pattern between talks
+    - Helps to build the platform team topology and operating model(s)
+    - Solution design / recording decisions (ADRs)
+- Advocating training and documentation
+- Gartner Hype Cycle (August 2022) - still early stages of platform engineering, but reaching htpe
+- Predictions:
+    - 1yr:
+        - FinOps (cutting cloud costs)
+        - Production resilience monitoring maturity
+        -  Local dev
+    - 2-3yrs:
+        - Developer friendly APIs
+        - Adoption of developer portals
+        - Low-code bootstrapping
+    - 3-5yrs:
+        - DORA and similar metrics
+            - Measure and look at how to be more efficient/secure, not a stick to beat developers
+- Operating model evolution
+    - Cost isn’t so hidden
+        - E.g. pipelines delayed, how much does that cost across all the engineers
+- Backstage
+    - Good plugin system
+- Her personal opinion: not even having a preprod. And if you’re not testing in prod, are you even testing?
+
+
+## Day 3
+
+### 5 Principles for Enablement
+- BBC
+- Enablement had a workshop with a team to help understand and optimise a team’s pipeline
+    - Saw an increase in deployments
+    - Objective measure of success
+- Enablement advertised their availability to teams to work with them
+    - Helped to understand their problems
+    - Pairing
+- Example with licensing:
+    - Build was not failed, issue raised by a bot on a Github repo instead
+- Guidance for teams:
+    - Examples, guides, how we work
+- Build and foster relationships
+    - Retrospectives with teams
+    - Presentations and discussions with the teams
+        - Knowledge sharing
+    - Running guilds
+        - Every two weeks
+        - Full day to do work for these guilds
+        - Looking at new tools, systems etc
+- Product teams don’t have much time to move tools and changing their workflow, unless it’s valuable
+    - Would get told to join the queue
+    - Need to respect their time
+    - Teams found tools wouldn’t work for them, would need to raise JIRA tickets to change things, didn’t know waht was available,
+      and teams ended up building their own thing
+- Accepting contributions for others
+    - But not the standard expectation
+    - Internal: same open-source model we have as a target
+    - Effort to merge every PR (not blindly)
+- BBC using Github
+    - 18k repos
+    - Over 100 projects
+- “Yaar in Review”
+    - Overview of progress, but more importantly a way to shout-out to / credit people external to the team
+- Releaseinator
+    - Just used for versioning and release documentation
+    - Automates manual processes
+- Q & A:
+    - How to balance autonomy and alignment?
+        - Went too far with autonomy, and now swung back to soemthing in the middle
+    - “Be on the ground working with teams, not in an ivory tower”
+    - 250 people in their direct engineering area, started with 5 engineers.
+        - Now supporting the entire org, not grown much larger (no specific number), but working closely with a platform team supporting the
+          entire org.
+
+
+### Enabling Platform Adoption
+- Super Awesome, a Epic Games company
+- They have four types of teams:
+    - Product: delivering to end-customers
+    - Agile coach
+    - Complicated subsystem teams: remove complexity of systems such as data-warehousing, authentication etc
+    - Platforms: deliver a technology as a service
+        - Seems to be a hybrid of “platform” and “dev enablement”
+    - Note: different to what we’ve seen in other talks / companies
+- They shadow teams when building something
+- Platform as a product:
+    - User-driven roadmap
+        - Internal: already doing this
+- Metrics:
+    - Product
+    - User satisfaction
+    - Reliability
+    - Adoption
+- How to enable adoption?
+    - Make it attractive
+        - Seen in other talks
+        - Affordable
+            - Lower cognitive load / make it easy to use / shouldn’t need to invest a lot of effort to use it
+        - Accessible
+    - Tried a spreadsheet of how their services worked, but too time consuming for end-users
+    - Asked teams what they wanted
+        - User survey
+        - Difficult to gain meaningful input, as specific to services/requirements
+    -  RFCs - request for comments
+        - Problem statement
+        - Goals
+        - Use cases
+        - Solution candidates
+        - Invite comments
+- Reduce price of adoption
+    -Automate as much as possible
+- Look after your users
+    - Self-service docs
+        - No prior knowledge of systems
+        - Audit regularly
+        - Make it simple
+        - Collect feedback on every page
+    - Quick start service
+        - Internal: same as example-service
+    - Singular cli for tools and docs
+        - On their roadmap, but not yet there
+    - Support:
+        - Define commitments (SLAs)
+        - Define channels and clear support workflow for each type of request
+- Accessible:
+    - Learn about common use cases
+        - Internal: define our paved paths
+        - User steering group
+        - User surveys
+    - Create a representative group
+        - Not just seniors/leads etc, but also juniors -> makeup of a standard team
+            - Different languages/frameworks etc
+        - Set clear objectives and listen to feedback
+        - Demo prototypes
+        - Follow up (and address failures/problems), and share success stories
+
+
+### How to Apply a Product Mindset to Your Platform Team Tomorrow
+- Picnic
+- Platform engineering
+    Building toolchains, processes and workflows for self-service
+- Product mindset
+    - Do not build, talk to your users
+    - Check it aligns with the company’s strategy
+    - Define and explain your team’s value to upper management and teams
+    - Understand what matters
+- error-prone.picnic.tech
+- Do not build:
+    - Talk to your CTO/CPO, engineers, tech leads, dev managers, architects and product managers
+    - Not just tinkering for fun, it’s about making the company successful
+- Design your personas
+    - Defining your use cases
+- “Chefs, cooking for chefs”
+- Don’t use DORA metrics
+    - Strategy: what are we trying to solve?
+    - Goals: what do we aim to achieve?
+    - Then: how do we measure it?
+    - Plan:
+        - Note: a bit lost on this part
+        - Measure to plan (>6 months)
+        - Measure for the board (3 months)
+        - Measure to optimise (1-3 months)
+        - Measure to operate (1-2 weeks)
+- Share success stories
+    - All hands
+    - Slack
+    - Changelog
+    - Encourage your users to share stories
+    - Need to market your internal product
+- They came up with a cute ghost sticker, and gave out stickers
+    - Branding!!! Seen in other talks. Love this idea.
+
+### Go Far, Go Together
+- Netflix
+- Studio domain of their company, building original content (TV / films)
+- Started with large monolithic graph
+- Created federated graphs
+    - Splitting-up into separate graphs
+- Why GraphQL?
+    - No over or under fetching of data
+    - Strongly typed and clear schema
+    - Facilities schema collaboration
+        - Note: doesn’t this seem like an anti-pattern?
+    - No versioning
+        - Breaking changes uses a “deprecation workflow”
+- Initial studio architecture
+    - Lots of calls to various backend services
+    - No source of data
+    - Thus put in a monolithic graphql between clients calling to services
+        - But monolith had a lot of logic
+    - Ended up moving to using a router
+        - Note: didn’t quite understand this part
+- Started becoming challenging for teams to adopt
+- They wanted to make a great developer experience
+    - Reduce learning curve
+    - Best practices
+- Built a “Domain Graph Service (DGS) framework in Java
+    - Spring annotation driven
+    - Code generation via gradle plugin
+    - Wider Netflix tracing and metrics support
+- Very heavy implementation-specific demo of their “DGS” Spring framework
+- Developed Intellij plugin to help migrate from their old “legacy” frameworks
